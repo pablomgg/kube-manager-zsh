@@ -808,36 +808,41 @@ _km_k9s() {
   esac
 
   if _km_is_prod_context "$ctx"; then
-    printf '%s%s%s\n' "$KM_YELLOW" "$(_km_t production_detected)" "$KM_RESET"
-    printf ' %s\n' "$(_km_t k9s_readonly_option)"
-    printf ' %s\n' "$(_km_t k9s_normal_option)"
-    printf ' %s\n%s' "$(_km_t cancel_option)" "$(_km_t choose_default_prompt)"
-    IFS= read -r mode
-    [[ -n "$mode" ]] || mode=1
-    case "$mode" in
-      1)
-        k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx" --readonly
-        ;;
-      2)
+    printf '%s%s%s\n\n' "$KM_YELLOW" "$(_km_t production_detected)" "$KM_RESET"
+  fi
+
+  printf '%s\n' "$(_km_t k9s_access_mode_question)"
+  printf ' %s\n' "$(_km_t k9s_readonly_option)"
+  printf ' %s\n' "$(_km_t k9s_superman_option)"
+  printf ' %s\n%s' "$(_km_t cancel_option)" "$(_km_t choose_default_prompt)"
+
+  IFS= read -r mode
+  [[ -n "$mode" ]] || mode=1
+
+  case "$mode" in
+    1)
+      k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx" --readonly
+      ;;
+
+    2)
+      if _km_is_prod_context "$ctx"; then
         printf "$(_km_t confirm_prod_context)" "$ctx"
         IFS= read -r answer
-        if [[ "$answer" = "$(_km_t confirm_prod_word)" ]]; then
-          k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx"
-        else
+
+        if [[ "$answer" != "$(_km_t confirm_prod_word)" ]]; then
           printf '%s\n' "$(_km_t cancelled)"
+          return 0
         fi
-        ;;
-      *) printf '%s\n' "$(_km_t cancelled)" ;;
-    esac
-  else
-    printf '%s' "$(_km_t open_k9s_question)"
-    IFS= read -r answer
-    if _km_is_yes "$answer"; then
+      fi
+
+      printf '%s\n' "$(_km_t superman_mode_enabled)"
       k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx"
-    else
+      ;;
+
+    *)
       printf '%s\n' "$(_km_t cancelled)"
-    fi
-  fi
+      ;;
+  esac
 }
 
 _km_backups() {

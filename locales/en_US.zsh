@@ -58,11 +58,12 @@ typeset -gA KM_I18N_EN_US=(
   selected_context "Selected context"
   k9s_invalid_connection "K9s will not be opened while the connection is invalid."
   production_detected "PRODUCTION ENVIRONMENT DETECTED"
-  k9s_readonly_option "[1] Open K9s READ-ONLY (recommended)"
-  k9s_normal_option "[2] Open K9s normally"
+  k9s_access_mode_question "How do you want to enter K9s?"
+  k9s_readonly_option "[1] READ-ONLY mode 🛡️ (recommended)"
+  k9s_superman_option "[2] Superman mode 🦸 READ/WRITE"
+  superman_mode_enabled "Superman mode enabled. With great power comes great responsibility..."
   confirm_prod_context "Confirm context [%s] again. Type YES to continue: "
   confirm_prod_word "YES"
-  open_k9s_question "Open K9s with this context? [y/N]: "
   no_backups "No config backup found."
   backup_prompt "Backup > "
   current_backup "Current state backup: %s"
@@ -145,7 +146,9 @@ HELP
 km k9s [context]
 
 Validates and explicitly displays the context before opening K9s.
-Contexts named prod/prd/production default to READ-ONLY mode.
+Always asks whether K9s should open in READ-ONLY or READ/WRITE mode.
+READ-ONLY is the default. Contexts named prod/prd/production require
+an additional confirmation before Superman READ/WRITE mode.
 HELP
       ;;
     lang|language)

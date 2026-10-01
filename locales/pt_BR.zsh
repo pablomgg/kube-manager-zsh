@@ -58,11 +58,12 @@ typeset -gA KM_I18N_PT_BR=(
   selected_context "Contexto selecionado"
   k9s_invalid_connection "O K9s não será aberto enquanto a conexão estiver inválida."
   production_detected "AMBIENTE IDENTIFICADO COMO PRODUÇÃO"
-  k9s_readonly_option "[1] Abrir K9s READ-ONLY (recomendado)"
-  k9s_normal_option "[2] Abrir K9s normal"
+  k9s_access_mode_question "Como deseja entrar no K9s?"
+  k9s_readonly_option "[1] Modo READ-ONLY 🛡️ (recomendado)"
+  k9s_superman_option "[2] Modo Super-Homem 🦸 READ/WRITE"
+  superman_mode_enabled "Modo Super-Homem ativado. Com grandes poderes vêm grandes responsabilidades..."
   confirm_prod_context "Confirme novamente o contexto [%s]. Digite SIM para continuar: "
   confirm_prod_word "SIM"
-  open_k9s_question "Abrir K9s neste contexto? [s/N]: "
   no_backups "Nenhum backup de config encontrado."
   backup_prompt "Backup > "
   current_backup "Backup do estado atual: %s"
@@ -145,7 +146,9 @@ HELP
 km k9s [context]
 
 Valida e exibe explicitamente o contexto antes de abrir o K9s.
-Contextos com nome prod/prd/production oferecem READ-ONLY como padrão.
+Sempre pergunta se o K9s deve abrir em READ-ONLY ou READ/WRITE.
+READ-ONLY é a opção padrão. Contextos prod/prd/production exigem
+confirmação adicional antes do modo Super-Homem READ/WRITE.
 HELP
       ;;
     lang|language)
