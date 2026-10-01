@@ -1,0 +1,16 @@
+.DS_Store
+
+# VS Code local settings
+.vscode/
+
+# JetBrains local settings
+.idea/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*.swo
+
+# Logs
+*.log
