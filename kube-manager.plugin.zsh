@@ -1,14 +1,19 @@
 # kube-manager.plugin.zsh
 # Personal Kubernetes kubeconfig manager for Oh My Zsh.
 
-KM_KUBE_DIR="${HOME}/.kube"
+# Paths can be overridden before loading the plugin.
+# This is useful on Linux/WSL, while keeping macOS defaults unchanged.
+KM_KUBE_DIR="${KM_KUBE_DIR:-${HOME}/.kube}"
 KM_MAIN_CONFIG="${KM_KUBE_DIR}/config"
 KM_CONFIGS_DIR="${KM_KUBE_DIR}/configs-plugin-km"
 KM_BACKUPS_DIR="${KM_KUBE_DIR}/backups-plugin-km"
 KM_STATE_DIR="${KM_KUBE_DIR}/state-plugin-km"
 KM_STATE_FILE="${KM_STATE_DIR}/imports.tsv"
-KM_DOWNLOADS_DIR="${HOME}/Downloads"
+KM_DOWNLOADS_DIR="${KM_DOWNLOADS_DIR:-}"
 KM_SETTINGS_FILE="${KM_STATE_DIR}/settings.conf"
+
+# Runtime platform: macos, linux, wsl or unknown.
+typeset -g KM_PLATFORM=""
 
 # Absolute plugin path, used to load locale files next to this plugin.
 KM_PLUGIN_DIR="${${(%):-%N}:A:h}"
@@ -17,6 +22,81 @@ KM_PLUGIN_DIR="${${(%):-%N}:A:h}"
 [[ -r "${KM_PLUGIN_DIR}/locales/en_US.zsh" ]] && source "${KM_PLUGIN_DIR}/locales/en_US.zsh"
 
 typeset -g KM_LANGUAGE=""
+
+
+_km_detect_platform() {
+  if [[ -n "${WSL_DISTRO_NAME:-}" || -n "${WSL_INTEROP:-}" ]]; then
+    KM_PLATFORM="wsl"
+    return 0
+  fi
+
+  case "$(uname -s 2>/dev/null)" in
+    Darwin)
+      KM_PLATFORM="macos"
+      ;;
+    Linux)
+      if [[ -r /proc/version ]] && grep -qiE 'microsoft|wsl' /proc/version 2>/dev/null; then
+        KM_PLATFORM="wsl"
+      else
+        KM_PLATFORM="linux"
+      fi
+      ;;
+    *)
+      KM_PLATFORM="unknown"
+      ;;
+  esac
+}
+
+_km_detect_downloads_dir() {
+  # Respect an explicit user override first.
+  [[ -n "${KM_DOWNLOADS_DIR:-}" ]] && return 0
+
+  case "$KM_PLATFORM" in
+    wsl)
+      # Prefer the Windows user's Downloads folder because browser downloads
+      # normally land there when using Windows + WSL.
+      if command -v cmd.exe >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1; then
+        local win_profile win_home
+        win_profile="$(cmd.exe /C 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r' | tail -n 1)"
+        if [[ -n "$win_profile" ]]; then
+          win_home="$(wslpath -u "$win_profile" 2>/dev/null)"
+          if [[ -n "$win_home" && -d "$win_home/Downloads" ]]; then
+            KM_DOWNLOADS_DIR="$win_home/Downloads"
+            return 0
+          fi
+        fi
+      fi
+      KM_DOWNLOADS_DIR="${HOME}/Downloads"
+      ;;
+
+    linux)
+      # Respect the desktop/XDG Downloads location when available.
+      if command -v xdg-user-dir >/dev/null 2>&1; then
+        local xdg_downloads
+        xdg_downloads="$(xdg-user-dir DOWNLOAD 2>/dev/null)"
+        if [[ -n "$xdg_downloads" && -d "$xdg_downloads" ]]; then
+          KM_DOWNLOADS_DIR="$xdg_downloads"
+          return 0
+        fi
+      fi
+      KM_DOWNLOADS_DIR="${HOME}/Downloads"
+      ;;
+
+    macos|*)
+      KM_DOWNLOADS_DIR="${HOME}/Downloads"
+      ;;
+  esac
+}
+
+_km_mktemp() {
+  local prefix="${1:-km}"
+  local temp_root="${TMPDIR:-/tmp}"
+  temp_root="${temp_root%/}"
+
+  # This template form works with both BSD mktemp (macOS)
+  # and GNU coreutils mktemp (Linux/WSL).
+  mktemp "${temp_root}/${prefix}.XXXXXX"
+}
 
 _km_load_language() {
   local saved=""
@@ -128,18 +208,35 @@ _km_ensure_dirs() {
 
 _km_require() {
   local missing=0 cmd
-  for cmd in kubectl jq shasum awk sed grep find sort; do
+  local required=(kubectl jq awk sed grep find sort paste cut tr head tail basename date mktemp uname)
+
+  for cmd in "${required[@]}"; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
       printf '%s%s%s: ' "$KM_RED" "$(_km_t error_prefix)" "$KM_RESET"
       printf "$(_km_t missing_dependency)\n" "$cmd"
       missing=1
     fi
   done
+
+  if ! command -v sha256sum >/dev/null 2>&1 && ! command -v shasum >/dev/null 2>&1; then
+    printf '%s%s%s: ' "$KM_RED" "$(_km_t error_prefix)" "$KM_RESET"
+    printf "$(_km_t missing_dependency)\n" 'sha256sum/shasum'
+    missing=1
+  fi
+
   [[ "$missing" -eq 0 ]]
 }
 
 _km_file_hash() {
-  shasum -a 256 "$1" | awk '{print $1}'
+  local file="$1"
+
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$file" | awk '{print $1}'
+  elif command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$file" | awk '{print $1}'
+  else
+    return 1
+  fi
 }
 
 _km_source_files() {
@@ -201,7 +298,7 @@ _km_state_line() {
 _km_state_set() {
   local identity="$1" hash="$2" source="$3" now tmp
   now="$(date '+%Y-%m-%dT%H:%M:%S%z')"
-  tmp="$(mktemp -t km-state)" || return 1
+  tmp="$(_km_mktemp km-state)" || return 1
   awk -F '\t' -v id="$identity" '$1 != id' "$KM_STATE_FILE" > "$tmp" 2>/dev/null || true
   printf '%s\t%s\t%s\t%s\n' "$identity" "$hash" "$source" "$now" >> "$tmp"
   mv "$tmp" "$KM_STATE_FILE"
@@ -425,6 +522,9 @@ _km_sources() {
 
 _km_download_candidates() {
   local file base
+  _km_detect_downloads_dir
+  [[ -d "$KM_DOWNLOADS_DIR" ]] || return 0
+
   setopt local_options nonomatch 2>/dev/null || true
   for file in "$KM_DOWNLOADS_DIR"/*; do
     [ -f "$file" ] || continue
@@ -465,7 +565,7 @@ _km_downloads() {
 
 _km_check_collisions() {
   local tmp source json collisions
-  tmp="$(mktemp -t km-collisions)" || return 1
+  tmp="$(_km_mktemp km-collisions)" || return 1
 
   _km_source_files | while IFS= read -r source; do
     [[ -n "$source" ]] || continue
@@ -520,7 +620,7 @@ _km_sync() {
   [[ -n "$backup" ]] && printf "$(_km_t backup_label)\n" "$backup"
 
   kubeconfig_list="$(printf '%s\n' "$files" | paste -sd ':' -)"
-  temp="$(mktemp -t km-config)" || return 1
+  temp="$(_km_mktemp km-config)" || return 1
 
   if ! KUBECONFIG="$kubeconfig_list" kubectl config view --flatten --raw > "$temp"; then
     rm -f "$temp"
@@ -923,6 +1023,8 @@ _km_menu() {
 }
 
 kube-manager() {
+  _km_detect_platform
+  _km_detect_downloads_dir
   _km_ensure_dirs
   _km_load_language
   _km_require || return 1
