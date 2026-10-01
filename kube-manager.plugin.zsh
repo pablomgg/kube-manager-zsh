@@ -198,7 +198,7 @@ _km_classify_file() {
 }
 
 _km_import_file() {
-  local file="$1" classification status existing identity hash ctx safe dest answer server
+  local file="$1" classification km_status existing identity hash ctx safe dest answer server
 
   [ -f "$file" ] || {
     printf '%sArquivo não encontrado:%s %s\n' "$KM_RED" "$KM_RESET" "$file"
@@ -211,13 +211,13 @@ _km_import_file() {
   fi
 
   classification="$(_km_classify_file "$file")"
-  status="${classification%%|*}"
+  km_status="${classification%%|*}"
   existing="${classification#*|}"
   identity="$(_km_identity_from_file "$file")"
   hash="$(_km_file_hash "$file")"
   ctx="$(_km_context_from_file "$file")"
 
-  case "$status" in
+  case "$km_status" in
     DUPLICATE)
       printf '%sDUPLICATE%s: já importado e conteúdo idêntico.\n' "$KM_CYAN" "$KM_RESET"
       printf 'Origem cadastrada: %s\n' "$existing"
@@ -275,7 +275,7 @@ _km_import_file() {
 }
 
 _km_sources() {
-  local source identity hash line old_hash status
+  local source identity hash line old_hash km_status
   printf '%-12s %-40s %s\n' 'STATUS' 'ARQUIVO' 'CONTEXTO'
   printf '%s\n' '--------------------------------------------------------------------------------'
 
@@ -291,13 +291,13 @@ _km_sources() {
     line="$(_km_state_line "$identity")"
 
     if [ -z "$line" ]; then
-      status='UNTRACKED'
+      km_status='UNTRACKED'
     else
       old_hash="$(printf '%s\n' "$line" | awk -F '\t' '{print $2}')"
-      if [ "$hash" = "$old_hash" ]; then status='TRACKED'; else status='CHANGED'; fi
+      if [ "$hash" = "$old_hash" ]; then km_status='TRACKED'; else km_status='CHANGED'; fi
     fi
 
-    printf '%-12s %-40s %s\n' "$status" "$(basename "$source")" "$(_km_context_from_file "$source")"
+    printf '%-12s %-40s %s\n' "$km_status" "$(basename "$source")" "$(_km_context_from_file "$source")"
   done
 }
 
@@ -318,7 +318,7 @@ _km_download_candidates() {
 }
 
 _km_downloads() {
-  local mode="$1" file classification status existing ctx answer found=0
+  local mode="$1" file classification km_status existing ctx answer found=0
 
   printf '%-14s %-35s %s\n' 'STATUS' 'ARQUIVO' 'CONTEXTO'
   printf '%s\n' '--------------------------------------------------------------------------------'
@@ -327,12 +327,12 @@ _km_downloads() {
     [ -n "$file" ] || continue
     found=1
     classification="$(_km_classify_file "$file")"
-    status="${classification%%|*}"
+    km_status="${classification%%|*}"
     existing="${classification#*|}"
     ctx="$(_km_context_from_file "$file")"
-    printf '%-14s %-35s %s\n' "$status" "$(basename "$file")" "$ctx"
+    printf '%-14s %-35s %s\n' "$km_status" "$(basename "$file")" "$ctx"
 
-    if [ "$mode" = 'import' ] && [ "$status" != 'DUPLICATE' ] && [ "$status" != 'INVALID' ]; then
+    if [ "$mode" = 'import' ] && [ "$km_status" != 'DUPLICATE' ] && [ "$km_status" != 'INVALID' ]; then
       printf 'Importar/atualizar este arquivo? [s/N]: '
       IFS= read -r answer
       case "$answer" in s|S|sim|SIM|y|Y|yes|YES) _km_import_file "$file" ;; esac
@@ -459,7 +459,7 @@ _km_validate_context_machine() {
 }
 
 _km_status() {
-  local ctx result status detail
+  local ctx result km_status detail
   if [ ! -f "$KM_MAIN_CONFIG" ]; then
     printf '%s~/.kube/config ainda não existe. Rode km sync.%s\n' "$KM_YELLOW" "$KM_RESET"
     return 1
@@ -470,25 +470,40 @@ _km_status() {
   kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name 2>/dev/null | while IFS= read -r ctx; do
     [ -n "$ctx" ] || continue
     result="$(_km_validate_context_machine "$ctx")"
-    status="${result%%|*}"
+    km_status="${result%%|*}"
     detail="${result#*|}"
-    printf '%-10s %-40s %s\n' "$status" "$ctx" "$detail"
+    printf '%-10s %-40s %s\n' "$km_status" "$ctx" "$detail"
   done
 }
 
 _km_select_context() {
   local contexts choice
-  contexts="$(kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name 2>/dev/null)"
+
+  contexts="$(kubectl config get-contexts \
+    --kubeconfig="$KM_MAIN_CONFIG" \
+    -o name 2>/dev/null)"
+
   [ -n "$contexts" ] || return 1
 
   if command -v fzf >/dev/null 2>&1; then
-    printf '%s\n' "$contexts" | fzf --prompt='Kubernetes context > '
+    printf '%s\n' "$contexts" | fzf \
+      --prompt='Kubernetes context > ' \
+      --height='~40%' \
+      --layout=reverse \
+      --border \
+      --no-multi \
+      --cycle \
+      --header='↑/↓ navega • Enter seleciona • Esc cancela'
+
     return $?
   fi
 
-  printf '%s\n' "$contexts" | awk '{printf " %2d) %s\n", NR, $0}' >&2
+  printf '%s\n' "$contexts" |
+    awk '{printf " %2d) %s\n", NR, $0}' >&2
+
   printf 'Escolha: ' >&2
   IFS= read -r choice
+
   printf '%s\n' "$contexts" | sed -n "${choice}p"
 }
 
@@ -520,18 +535,18 @@ _km_use() {
 }
 
 _km_validate() {
-  local ctx="$1" result status detail
+  local ctx="$1" result km_status detail
   if [ -z "$ctx" ]; then
     _km_status
     return $?
   fi
 
   result="$(_km_validate_context_machine "$ctx")"
-  status="${result%%|*}"
+  km_status="${result%%|*}"
   detail="${result#*|}"
-  printf 'Contexto: %s\nStatus:   %s\nDetalhe:  %s\nServer:   %s\n' "$ctx" "$status" "$detail" "$(_km_context_server "$ctx")"
+  printf 'Contexto: %s\nStatus:   %s\nDetalhe:  %s\nServer:   %s\n' "$ctx" "$km_status" "$detail" "$(_km_context_server "$ctx")"
 
-  if [ "$status" = 'ONLINE' ] || [ "$status" = 'LIMITED' ]; then
+  if [ "$km_status" = 'ONLINE' ] || [ "$km_status" = 'LIMITED' ]; then
     printf '\ncluster-info:\n'
     kubectl --kubeconfig="$KM_MAIN_CONFIG" --context="$ctx" --request-timeout=5s cluster-info 2>&1
   fi
@@ -542,7 +557,7 @@ _km_is_prod_context() {
 }
 
 _km_k9s() {
-  local ctx="$1" result status detail server answer mode
+  local ctx="$1" result km_status detail server answer mode
   command -v k9s >/dev/null 2>&1 || {
     printf '%sk9s não está instalado.%s\n' "$KM_RED" "$KM_RESET"
     return 1
@@ -550,14 +565,14 @@ _km_k9s() {
 
   [ -n "$ctx" ] || ctx="$(_km_select_context)" || return 1
   result="$(_km_validate_context_machine "$ctx")"
-  status="${result%%|*}"
+  km_status="${result%%|*}"
   detail="${result#*|}"
   server="$(_km_context_server "$ctx")"
 
   printf '\n%sContexto selecionado%s\n' "$KM_BOLD" "$KM_RESET"
-  printf 'Context: %s\nServer:  %s\nStatus:  %s - %s\n\n' "$ctx" "$server" "$status" "$detail"
+  printf 'Context: %s\nServer:  %s\nStatus:  %s - %s\n\n' "$ctx" "$server" "$km_status" "$detail"
 
-  case "$status" in AUTH|TLS|OFFLINE|ERROR)
+  case "$km_status" in AUTH|TLS|OFFLINE|ERROR)
     printf '%sO K9s não será aberto enquanto a conexão estiver inválida.%s\n' "$KM_RED" "$KM_RESET"
     return 1
   esac
@@ -709,7 +724,7 @@ _km_pause() {
   IFS= read -r _km_dummy
 }
 
-_km_menu() {
+_km_menu_numeric() {
   local option file
   while true; do
     clear
@@ -761,6 +776,80 @@ MENU
       h|H|help) _km_help; _km_pause ;;
       0|q|Q) return 0 ;;
       *) printf 'Opção inválida.\n'; sleep 1 ;;
+    esac
+  done
+}
+
+_km_menu() {
+  local selected action file answer context
+
+  # Sem fzf, mantém compatibilidade com o menu numérico.
+  if ! command -v fzf >/dev/null 2>&1; then
+    _km_menu_numeric
+    return $?
+  fi
+
+  while true; do
+    clear
+    printf '%sKubernetes Config Manager%s\n\n' "$KM_BOLD" "$KM_RESET"
+    printf 'Current context: %s\n' "$(kubectl config current-context --kubeconfig="$KM_MAIN_CONFIG" 2>/dev/null || printf '-')"
+    printf 'Sources:         %s\n\n' "$KM_CONFIGS_DIR"
+
+    selected="$(cat <<'MENU' | fzf \
+      --prompt='Ação > ' \
+      --height='~70%' \
+      --layout=reverse \
+      --border \
+      --no-multi \
+      --cycle \
+      --header='↑/↓ navega • Enter seleciona • Esc cancela'
+01  Status/validar todos os clusters
+02  Ver kubeconfigs em Downloads
+03  Importar kubeconfig específico
+04  Sincronizar configs -> ~/.kube/config
+05  Listar contexts
+06  Trocar current-context
+07  Validar um contexto
+08  Abrir K9s
+09  Listar fontes
+10  Backups
+11  Restaurar backup
+H   Help
+0   Sair
+MENU
+    )" || return 0
+
+    action="${selected%% *}"
+
+    case "$action" in
+      01) _km_status; _km_pause ;;
+      02)
+        _km_downloads
+        printf '\nDeseja entrar no modo de importação dos Downloads? [s/N]: '
+        IFS= read -r answer
+        case "$answer" in s|S|sim|SIM|y|Y|yes|YES) _km_downloads import ;; esac
+        _km_pause
+        ;;
+      03)
+        printf 'Caminho do kubeconfig: '
+        IFS= read -r file
+        file="${file/#\~/$HOME}"
+        _km_import_file "$file"
+        _km_pause
+        ;;
+      04) _km_sync; _km_pause ;;
+      05) _km_contexts; _km_pause ;;
+      06) _km_use; _km_pause ;;
+      07)
+        context="$(_km_select_context)" && _km_validate "$context"
+        _km_pause
+        ;;
+      08) _km_k9s; _km_pause ;;
+      09) _km_sources; _km_pause ;;
+      10) _km_backups; _km_pause ;;
+      11) _km_restore; _km_pause ;;
+      H|h) _km_help; _km_pause ;;
+      0) return 0 ;;
     esac
   done
 }
