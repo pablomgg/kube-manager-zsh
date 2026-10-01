@@ -8,6 +8,106 @@ KM_BACKUPS_DIR="${KM_KUBE_DIR}/backups-plugin-km"
 KM_STATE_DIR="${KM_KUBE_DIR}/state-plugin-km"
 KM_STATE_FILE="${KM_STATE_DIR}/imports.tsv"
 KM_DOWNLOADS_DIR="${HOME}/Downloads"
+KM_SETTINGS_FILE="${KM_STATE_DIR}/settings.conf"
+
+# Absolute plugin path, used to load locale files next to this plugin.
+KM_PLUGIN_DIR="${${(%):-%N}:A:h}"
+
+[[ -r "${KM_PLUGIN_DIR}/locales/pt_BR.zsh" ]] && source "${KM_PLUGIN_DIR}/locales/pt_BR.zsh"
+[[ -r "${KM_PLUGIN_DIR}/locales/en_US.zsh" ]] && source "${KM_PLUGIN_DIR}/locales/en_US.zsh"
+
+typeset -g KM_LANGUAGE=""
+
+_km_load_language() {
+  local saved=""
+
+  if [[ -f "$KM_SETTINGS_FILE" ]]; then
+    saved="$(awk -F= '$1 == "KM_LANGUAGE" {print $2; exit}' "$KM_SETTINGS_FILE" 2>/dev/null)"
+  fi
+
+  case "$saved" in
+    pt_BR|en_US)
+      KM_LANGUAGE="$saved"
+      return 0
+      ;;
+  esac
+
+  case "${LANG:-}" in
+    pt_BR*|pt_PT*) KM_LANGUAGE="pt_BR" ;;
+    *)             KM_LANGUAGE="en_US" ;;
+  esac
+}
+
+_km_t() {
+  local key="$1" value=""
+
+  case "$KM_LANGUAGE" in
+    pt_BR) value="${KM_I18N_PT_BR[$key]-}" ;;
+    *)     value="${KM_I18N_EN_US[$key]-}" ;;
+  esac
+
+  [[ -n "$value" ]] || value="$key"
+  printf '%s' "$value"
+}
+
+_km_is_yes() {
+  case "$1" in
+    s|S|sim|SIM|y|Y|yes|YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+_km_save_language() {
+  local lang="$1" label
+
+  case "$lang" in
+    pt_BR) label='Português (Brasil)' ;;
+    en_US) label='English' ;;
+    *)
+      printf "$(_km_t invalid_language)\n" "$lang"
+      return 1
+      ;;
+  esac
+
+  printf 'KM_LANGUAGE=%s\n' "$lang" > "$KM_SETTINGS_FILE"
+  chmod 600 "$KM_SETTINGS_FILE" 2>/dev/null || true
+  KM_LANGUAGE="$lang"
+  printf "$(_km_t language_changed)\n" "$label"
+}
+
+_km_language() {
+  local lang="$1" selected
+
+  if [[ -n "$lang" ]]; then
+    _km_save_language "$lang"
+    return $?
+  fi
+
+  if command -v fzf >/dev/null 2>&1; then
+    selected="$(printf '%s\n' \
+      'pt_BR  Português (Brasil)' \
+      'en_US  English' | fzf \
+      --prompt="$(_km_t language_prompt)" \
+      --height='~40%' \
+      --layout=reverse \
+      --border \
+      --no-multi \
+      --cycle \
+      --header="$(_km_t nav_hint)")" || return 0
+    lang="${selected%% *}"
+  else
+    printf '%s\n' '1) Português (Brasil)' '2) English'
+    printf '%s' "$(_km_t choose_prompt)"
+    IFS= read -r selected
+    case "$selected" in
+      1) lang='pt_BR' ;;
+      2) lang='en_US' ;;
+      *) return 0 ;;
+    esac
+  fi
+
+  _km_save_language "$lang"
+}
 
 KM_RED=$'\033[31m'
 KM_GREEN=$'\033[32m'
@@ -23,17 +123,19 @@ _km_ensure_dirs() {
   chmod 700 "$KM_KUBE_DIR" "$KM_CONFIGS_DIR" "$KM_BACKUPS_DIR" "$KM_STATE_DIR" 2>/dev/null || true
   touch "$KM_STATE_FILE"
   chmod 600 "$KM_STATE_FILE" 2>/dev/null || true
+  [[ -f "$KM_SETTINGS_FILE" ]] && chmod 600 "$KM_SETTINGS_FILE" 2>/dev/null || true
 }
 
 _km_require() {
   local missing=0 cmd
   for cmd in kubectl jq shasum awk sed grep find sort; do
     if ! command -v "$cmd" >/dev/null 2>&1; then
-      printf '%sERRO%s: dependência ausente: %s\n' "$KM_RED" "$KM_RESET" "$cmd"
+      printf '%s%s%s: ' "$KM_RED" "$(_km_t error_prefix)" "$KM_RESET"
+      printf "$(_km_t missing_dependency)\n" "$cmd"
       missing=1
     fi
   done
-  [ "$missing" -eq 0 ]
+  [[ "$missing" -eq 0 ]]
 }
 
 _km_file_hash() {
@@ -198,15 +300,17 @@ _km_classify_file() {
 }
 
 _km_import_file() {
-  local file="$1" classification km_status existing identity hash ctx safe dest answer server
+  local file="$1" classification km_status existing identity hash ctx safe dest answer
 
-  [ -f "$file" ] || {
-    printf '%sArquivo não encontrado:%s %s\n' "$KM_RED" "$KM_RESET" "$file"
+  [[ -f "$file" ]] || {
+    printf '%s%s%s: ' "$KM_RED" "$(_km_t error_prefix)" "$KM_RESET"
+    printf "$(_km_t file_not_found)\n" "$file"
     return 1
   }
 
   if ! _km_is_kubeconfig "$file"; then
-    printf '%sArquivo não parece ser um kubeconfig válido:%s %s\n' "$KM_RED" "$KM_RESET" "$file"
+    printf '%s%s%s: ' "$KM_RED" "$(_km_t error_prefix)" "$KM_RESET"
+    printf "$(_km_t invalid_kubeconfig)\n" "$file"
     return 1
   fi
 
@@ -219,30 +323,41 @@ _km_import_file() {
 
   case "$km_status" in
     DUPLICATE)
-      printf '%sDUPLICATE%s: já importado e conteúdo idêntico.\n' "$KM_CYAN" "$KM_RESET"
-      printf 'Origem cadastrada: %s\n' "$existing"
+      printf '%sDUPLICATE%s: %s\n' "$KM_CYAN" "$KM_RESET" "$(_km_t duplicate_identical)"
+      printf "$(_km_t registered_source)\n" "$existing"
       return 0
       ;;
 
     UPDATE)
-      printf '%sUPDATE%s: mesmo cluster/contexto, conteúdo diferente.\n' "$KM_YELLOW" "$KM_RESET"
-      printf 'Atual: %s\nNovo:  %s\n' "$existing" "$file"
-      printf 'Substituir o kubeconfig existente? [s/N]: '
+      printf '%sUPDATE%s: %s\n' "$KM_YELLOW" "$KM_RESET" "$(_km_t update_changed)"
+      printf "$(_km_t current_file)\n" "$existing"
+      printf "$(_km_t new_file)\n" "$file"
+      printf '%s' "$(_km_t replace_existing_question)"
       IFS= read -r answer
-      case "$answer" in s|S|sim|SIM|y|Y|yes|YES) ;; *) printf 'Cancelado.\n'; return 0 ;; esac
+      if ! _km_is_yes "$answer"; then
+        printf '%s\n' "$(_km_t cancelled)"
+        return 0
+      fi
       _km_backup_source "$existing" >/dev/null || return 1
       cp "$file" "$existing" || return 1
       chmod 600 "$existing" 2>/dev/null || true
       _km_state_set "$identity" "$hash" "$existing"
-      printf '%sAtualizado:%s %s\n' "$KM_GREEN" "$KM_RESET" "$existing"
+      printf '%s' "$KM_GREEN"
+      printf "$(_km_t updated)\n" "$existing"
+      printf '%s' "$KM_RESET"
       return 0
       ;;
 
     SAME_SERVER)
-      printf '%sATENÇÃO%s: já existe um kubeconfig apontando para o mesmo API server:\n' "$KM_YELLOW" "$KM_RESET"
-      printf 'Existente: %s\nNovo:      %s\n' "$existing" "$file"
-      printf '\nPode ser uma credencial renovada OU outro contexto/namespace no mesmo cluster.\n'
-      printf ' [1] Substituir o existente\n [2] Importar como contexto separado\n [0] Cancelar\nEscolha: '
+      printf '%s%s%s: %s\n' "$KM_YELLOW" "$(_km_t warning_prefix)" "$KM_RESET" "$(_km_t same_server_warning)"
+      printf "$(_km_t existing_file)\n" "$existing"
+      printf "$(_km_t new_file_aligned)\n" "$file"
+      printf '\n%s\n' "$(_km_t same_server_explanation)"
+      printf ' %s\n %s\n %s\n%s' \
+        "$(_km_t replace_existing_option)" \
+        "$(_km_t import_separate_option)" \
+        "$(_km_t cancel_option)" \
+        "$(_km_t choose_prompt)"
       IFS= read -r answer
       case "$answer" in
         1)
@@ -250,20 +365,25 @@ _km_import_file() {
           cp "$file" "$existing" || return 1
           chmod 600 "$existing" 2>/dev/null || true
           _km_state_set "$identity" "$hash" "$existing"
-          printf '%sAtualizado:%s %s\n' "$KM_GREEN" "$KM_RESET" "$existing"
+          printf '%s' "$KM_GREEN"
+          printf "$(_km_t updated)\n" "$existing"
+          printf '%s' "$KM_RESET"
           return 0
           ;;
         2) ;;
-        *) printf 'Cancelado.\n'; return 0 ;;
+        *)
+          printf '%s\n' "$(_km_t cancelled)"
+          return 0
+          ;;
       esac
       ;;
   esac
 
   safe="$(_km_sanitize_name "$ctx")"
-  [ -n "$safe" ] || safe="cluster-$(printf '%s' "$hash" | cut -c1-8)"
+  [[ -n "$safe" ]] || safe="cluster-$(printf '%s' "$hash" | cut -c1-8)"
   dest="${KM_CONFIGS_DIR}/${safe}.yaml"
 
-  if [ -e "$dest" ]; then
+  if [[ -e "$dest" ]]; then
     dest="${KM_CONFIGS_DIR}/${safe}-$(printf '%s' "$hash" | cut -c1-8).yaml"
   fi
 
@@ -271,16 +391,18 @@ _km_import_file() {
   chmod 600 "$dest" 2>/dev/null || true
   _km_state_set "$identity" "$hash" "$dest"
 
-  printf '%sImportado:%s %s\n' "$KM_GREEN" "$KM_RESET" "$dest"
+  printf '%s' "$KM_GREEN"
+  printf "$(_km_t imported)\n" "$dest"
+  printf '%s' "$KM_RESET"
 }
 
 _km_sources() {
   local source identity hash line old_hash km_status
-  printf '%-12s %-40s %s\n' 'STATUS' 'ARQUIVO' 'CONTEXTO'
+  printf '%-12s %-40s %s\n' "$(_km_t header_status)" "$(_km_t header_file)" "$(_km_t header_context)"
   printf '%s\n' '--------------------------------------------------------------------------------'
 
   _km_source_files | while IFS= read -r source; do
-    [ -n "$source" ] || continue
+    [[ -n "$source" ]] || continue
     if ! _km_is_kubeconfig "$source"; then
       printf '%-12s %-40s %s\n' 'INVALID' "$(basename "$source")" '-'
       continue
@@ -290,11 +412,11 @@ _km_sources() {
     hash="$(_km_file_hash "$source")"
     line="$(_km_state_line "$identity")"
 
-    if [ -z "$line" ]; then
+    if [[ -z "$line" ]]; then
       km_status='UNTRACKED'
     else
       old_hash="$(printf '%s\n' "$line" | awk -F '\t' '{print $2}')"
-      if [ "$hash" = "$old_hash" ]; then km_status='TRACKED'; else km_status='CHANGED'; fi
+      if [[ "$hash" = "$old_hash" ]]; then km_status='TRACKED'; else km_status='CHANGED'; fi
     fi
 
     printf '%-12s %-40s %s\n' "$km_status" "$(basename "$source")" "$(_km_context_from_file "$source")"
@@ -320,11 +442,11 @@ _km_download_candidates() {
 _km_downloads() {
   local mode="$1" file classification km_status existing ctx answer found=0
 
-  printf '%-14s %-35s %s\n' 'STATUS' 'ARQUIVO' 'CONTEXTO'
+  printf '%-14s %-35s %s\n' "$(_km_t header_status)" "$(_km_t header_file)" "$(_km_t header_context)"
   printf '%s\n' '--------------------------------------------------------------------------------'
 
   while IFS= read -r file <&3; do
-    [ -n "$file" ] || continue
+    [[ -n "$file" ]] || continue
     found=1
     classification="$(_km_classify_file "$file")"
     km_status="${classification%%|*}"
@@ -332,10 +454,10 @@ _km_downloads() {
     ctx="$(_km_context_from_file "$file")"
     printf '%-14s %-35s %s\n' "$km_status" "$(basename "$file")" "$ctx"
 
-    if [ "$mode" = 'import' ] && [ "$km_status" != 'DUPLICATE' ] && [ "$km_status" != 'INVALID' ]; then
-      printf 'Importar/atualizar este arquivo? [s/N]: '
+    if [[ "$mode" = 'import' && "$km_status" != 'DUPLICATE' && "$km_status" != 'INVALID' ]]; then
+      printf '%s' "$(_km_t import_update_question)"
       IFS= read -r answer
-      case "$answer" in s|S|sim|SIM|y|Y|yes|YES) _km_import_file "$file" ;; esac
+      _km_is_yes "$answer" && _km_import_file "$file"
       printf '\n'
     fi
   done 3< <(_km_download_candidates)
@@ -346,14 +468,14 @@ _km_check_collisions() {
   tmp="$(mktemp -t km-collisions)" || return 1
 
   _km_source_files | while IFS= read -r source; do
-    [ -n "$source" ] || continue
+    [[ -n "$source" ]] || continue
     json="$(_km_kubeconfig_json "$source")" || continue
     printf '%s' "$json" | jq -r '.contexts[]?.name' | while IFS= read -r n; do printf 'context\t%s\t%s\n' "$n" "$source"; done
     printf '%s' "$json" | jq -r '.clusters[]?.name' | while IFS= read -r n; do printf 'cluster\t%s\t%s\n' "$n" "$source"; done
     printf '%s' "$json" | jq -r '.users[]?.name'    | while IFS= read -r n; do printf 'user\t%s\t%s\n' "$n" "$source"; done
   done > "$tmp"
 
-  collisions="$(awk -F '\t' '
+  collisions="$(awk -F '\t' -v dup="$(_km_t duplicate_word)" '
     {
       key=$1 "\t" $2
       count[key]++
@@ -363,15 +485,15 @@ _km_check_collisions() {
       for (key in count) {
         if (count[key] > 1) {
           split(key, parts, "\t")
-          printf "%s duplicado: %s%s\n", parts[1], parts[2], files[key]
+          printf "%s %s: %s%s\n", parts[1], dup, parts[2], files[key]
         }
       }
     }
   ' "$tmp")"
   rm -f "$tmp"
 
-  if [ -n "$collisions" ]; then
-    printf '%sColisões encontradas entre kubeconfigs:%s\n\n%s\n' "$KM_RED" "$KM_RESET" "$collisions"
+  if [[ -n "$collisions" ]]; then
+    printf '%s%s%s\n\n%s\n' "$KM_RED" "$(_km_t collisions_found)" "$KM_RESET" "$collisions"
     return 1
   fi
   return 0
@@ -380,34 +502,36 @@ _km_check_collisions() {
 _km_sync() {
   local files kubeconfig_list temp backup old_context context_count source identity hash
   files="$(_km_source_files)"
-  if [ -z "$files" ]; then
-    printf '%sNenhum kubeconfig encontrado em %s%s\n' "$KM_YELLOW" "$KM_CONFIGS_DIR" "$KM_RESET"
+  if [[ -z "$files" ]]; then
+    printf '%s' "$KM_YELLOW"
+    printf "$(_km_t no_kubeconfigs)\n" "$KM_CONFIGS_DIR"
+    printf '%s' "$KM_RESET"
     return 1
   fi
 
-  printf 'Validando colisões...\n'
+  printf '%s\n' "$(_km_t validating_collisions)"
   _km_check_collisions || {
-    printf '\nSync cancelado. Na V1 o plugin não sobrescreve nomes duplicados silenciosamente.\n'
+    printf '\n%s\n' "$(_km_t sync_cancelled_collisions)"
     return 1
   }
 
   old_context="$(kubectl config current-context --kubeconfig="$KM_MAIN_CONFIG" 2>/dev/null || true)"
   backup="$(_km_backup_main_config)" || return 1
-  [ -n "$backup" ] && printf 'Backup: %s\n' "$backup"
+  [[ -n "$backup" ]] && printf "$(_km_t backup_label)\n" "$backup"
 
   kubeconfig_list="$(printf '%s\n' "$files" | paste -sd ':' -)"
   temp="$(mktemp -t km-config)" || return 1
 
   if ! KUBECONFIG="$kubeconfig_list" kubectl config view --flatten --raw > "$temp"; then
     rm -f "$temp"
-    printf '%sFalha ao gerar kubeconfig consolidado.%s\n' "$KM_RED" "$KM_RESET"
+    printf '%s%s%s\n' "$KM_RED" "$(_km_t consolidate_failed)" "$KM_RESET"
     return 1
   fi
 
   context_count="$(kubectl config view --kubeconfig="$temp" -o json 2>/dev/null | jq '.contexts | length')"
-  if [ -z "$context_count" ] || [ "$context_count" -eq 0 ]; then
+  if [[ -z "$context_count" || "$context_count" -eq 0 ]]; then
     rm -f "$temp"
-    printf '%sConfig gerado não possui contexts. Abortado.%s\n' "$KM_RED" "$KM_RESET"
+    printf '%s%s%s\n' "$KM_RED" "$(_km_t generated_no_contexts)" "$KM_RESET"
     return 1
   fi
 
@@ -415,19 +539,21 @@ _km_sync() {
   mv "$temp" "$KM_MAIN_CONFIG"
   chmod 600 "$KM_MAIN_CONFIG" 2>/dev/null || true
 
-  if [ -n "$old_context" ] && kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name 2>/dev/null | grep -Fxq "$old_context"; then
+  if [[ -n "$old_context" ]] && kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name 2>/dev/null | grep -Fxq "$old_context"; then
     kubectl config use-context --kubeconfig="$KM_MAIN_CONFIG" "$old_context" >/dev/null 2>&1 || true
   fi
 
   _km_source_files | while IFS= read -r source; do
-    [ -n "$source" ] || continue
+    [[ -n "$source" ]] || continue
     identity="$(_km_identity_from_file "$source" 2>/dev/null)" || continue
     hash="$(_km_file_hash "$source")"
     _km_state_set "$identity" "$hash" "$source"
   done
 
-  printf '%sSync concluído.%s Contexts no config principal: %s\n' "$KM_GREEN" "$KM_RESET" "$context_count"
-  [ -n "$old_context" ] && printf 'Contexto anterior preservado quando disponível: %s\n' "$old_context"
+  printf '%s' "$KM_GREEN"
+  printf "$(_km_t sync_complete)\n" "$context_count"
+  printf '%s' "$KM_RESET"
+  [[ -n "$old_context" ]] && printf "$(_km_t previous_context_preserved)\n" "$old_context"
 }
 
 _km_context_server() {
@@ -443,16 +569,16 @@ _km_validate_context_machine() {
   rc=$?
   lower="$(printf '%s' "$output" | tr '[:upper:]' '[:lower:]')"
 
-  if [ "$rc" -eq 0 ] && printf '%s\n' "$lower" | grep -q 'yes'; then
-    printf 'ONLINE|auth ok\n'
+  if [[ "$rc" -eq 0 ]] && printf '%s\n' "$lower" | grep -q 'yes'; then
+    printf 'ONLINE|%s\n' "$(_km_t auth_ok)"
   elif printf '%s\n' "$lower" | grep -Eq '(^|[[:space:]])no($|[[:space:]])|forbidden'; then
-    printf 'LIMITED|autenticado, mas sem permissão para essa verificação\n'
+    printf 'LIMITED|%s\n' "$(_km_t limited_detail)"
   elif printf '%s\n' "$lower" | grep -Eq 'unauthorized|must be logged in|token.*expired|expired.*token|invalid.*token'; then
-    printf 'AUTH|credencial expirada ou inválida\n'
+    printf 'AUTH|%s\n' "$(_km_t auth_detail)"
   elif printf '%s\n' "$lower" | grep -Eq 'x509|certificate.*expired|certificate signed by unknown'; then
-    printf 'TLS|erro de certificado/TLS\n'
+    printf 'TLS|%s\n' "$(_km_t tls_detail)"
   elif printf '%s\n' "$lower" | grep -Eq 'timeout|timed out|connection refused|no route to host|dial tcp|i/o timeout|context deadline exceeded|network is unreachable'; then
-    printf 'OFFLINE|API server indisponível ou sem rota\n'
+    printf 'OFFLINE|%s\n' "$(_km_t offline_detail)"
   else
     printf 'ERROR|%s\n' "$(printf '%s' "$output" | head -n1)"
   fi
@@ -460,15 +586,15 @@ _km_validate_context_machine() {
 
 _km_status() {
   local ctx result km_status detail
-  if [ ! -f "$KM_MAIN_CONFIG" ]; then
-    printf '%s~/.kube/config ainda não existe. Rode km sync.%s\n' "$KM_YELLOW" "$KM_RESET"
+  if [[ ! -f "$KM_MAIN_CONFIG" ]]; then
+    printf '%s%s%s\n' "$KM_YELLOW" "$(_km_t config_missing)" "$KM_RESET"
     return 1
   fi
 
-  printf '%-10s %-40s %s\n' 'STATUS' 'CONTEXTO' 'DETALHE'
+  printf '%-10s %-40s %s\n' "$(_km_t header_status)" "$(_km_t header_context)" "$(_km_t header_detail)"
   printf '%s\n' '------------------------------------------------------------------------------------------'
   kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name 2>/dev/null | while IFS= read -r ctx; do
-    [ -n "$ctx" ] || continue
+    [[ -n "$ctx" ]] || continue
     result="$(_km_validate_context_machine "$ctx")"
     km_status="${result%%|*}"
     detail="${result#*|}"
@@ -478,32 +604,24 @@ _km_status() {
 
 _km_select_context() {
   local contexts choice
-
-  contexts="$(kubectl config get-contexts \
-    --kubeconfig="$KM_MAIN_CONFIG" \
-    -o name 2>/dev/null)"
-
-  [ -n "$contexts" ] || return 1
+  contexts="$(kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name 2>/dev/null)"
+  [[ -n "$contexts" ]] || return 1
 
   if command -v fzf >/dev/null 2>&1; then
     printf '%s\n' "$contexts" | fzf \
-      --prompt='Kubernetes context > ' \
+      --prompt="$(_km_t select_context_prompt)" \
       --height='~40%' \
       --layout=reverse \
       --border \
       --no-multi \
       --cycle \
-      --header='↑/↓ navega • Enter seleciona • Esc cancela'
-
+      --header="$(_km_t nav_hint)"
     return $?
   fi
 
-  printf '%s\n' "$contexts" |
-    awk '{printf " %2d) %s\n", NR, $0}' >&2
-
-  printf 'Escolha: ' >&2
+  printf '%s\n' "$contexts" | awk '{printf " %2d) %s\\n", NR, $0}' >&2
+  printf '%s' "$(_km_t choose_prompt)" >&2
   IFS= read -r choice
-
   printf '%s\n' "$contexts" | sed -n "${choice}p"
 }
 
@@ -517,26 +635,29 @@ _km_current() {
 
 _km_use() {
   local ctx="$1" server answer
-  [ -n "$ctx" ] || ctx="$(_km_select_context)" || return 1
+  [[ -n "$ctx" ]] || ctx="$(_km_select_context)" || return 1
 
   if ! kubectl config get-contexts --kubeconfig="$KM_MAIN_CONFIG" -o name | grep -Fxq "$ctx"; then
-    printf '%sContexto não encontrado:%s %s\n' "$KM_RED" "$KM_RESET" "$ctx"
+    printf '%s' "$KM_RED"
+    printf "$(_km_t context_not_found)\n" "$ctx"
+    printf '%s' "$KM_RESET"
     return 1
   fi
 
   server="$(_km_context_server "$ctx")"
-  printf '\nContexto: %s\nServer:   %s\n\n' "$ctx" "$server"
-  printf 'Tornar este o current-context? [s/N]: '
+  printf '\n%s: %s\n%s: %s\n\n' "$(_km_t context_label)" "$ctx" "$(_km_t server_label)" "$server"
+  printf '%s' "$(_km_t set_current_question)"
   IFS= read -r answer
-  case "$answer" in
-    s|S|sim|SIM|y|Y|yes|YES) kubectl config use-context --kubeconfig="$KM_MAIN_CONFIG" "$ctx" ;;
-    *) printf 'Cancelado.\n' ;;
-  esac
+  if _km_is_yes "$answer"; then
+    kubectl config use-context --kubeconfig="$KM_MAIN_CONFIG" "$ctx"
+  else
+    printf '%s\n' "$(_km_t cancelled)"
+  fi
 }
 
 _km_validate() {
   local ctx="$1" result km_status detail
-  if [ -z "$ctx" ]; then
+  if [[ -z "$ctx" ]]; then
     _km_status
     return $?
   fi
@@ -544,10 +665,14 @@ _km_validate() {
   result="$(_km_validate_context_machine "$ctx")"
   km_status="${result%%|*}"
   detail="${result#*|}"
-  printf 'Contexto: %s\nStatus:   %s\nDetalhe:  %s\nServer:   %s\n' "$ctx" "$km_status" "$detail" "$(_km_context_server "$ctx")"
+  printf '%s: %s\n%s: %s\n%s: %s\n%s: %s\n' \
+    "$(_km_t context_label)" "$ctx" \
+    "$(_km_t status_label)" "$km_status" \
+    "$(_km_t detail_label)" "$detail" \
+    "$(_km_t server_label)" "$(_km_context_server "$ctx")"
 
-  if [ "$km_status" = 'ONLINE' ] || [ "$km_status" = 'LIMITED' ]; then
-    printf '\ncluster-info:\n'
+  if [[ "$km_status" = 'ONLINE' || "$km_status" = 'LIMITED' ]]; then
+    printf '\n%s\n' "$(_km_t cluster_info_label)"
     kubectl --kubeconfig="$KM_MAIN_CONFIG" --context="$ctx" --request-timeout=5s cluster-info 2>&1
   fi
 }
@@ -559,44 +684,59 @@ _km_is_prod_context() {
 _km_k9s() {
   local ctx="$1" result km_status detail server answer mode
   command -v k9s >/dev/null 2>&1 || {
-    printf '%sk9s não está instalado.%s\n' "$KM_RED" "$KM_RESET"
+    printf '%s%s%s\n' "$KM_RED" "$(_km_t k9s_not_installed)" "$KM_RESET"
     return 1
   }
 
-  [ -n "$ctx" ] || ctx="$(_km_select_context)" || return 1
+  [[ -n "$ctx" ]] || ctx="$(_km_select_context)" || return 1
   result="$(_km_validate_context_machine "$ctx")"
   km_status="${result%%|*}"
   detail="${result#*|}"
   server="$(_km_context_server "$ctx")"
 
-  printf '\n%sContexto selecionado%s\n' "$KM_BOLD" "$KM_RESET"
-  printf 'Context: %s\nServer:  %s\nStatus:  %s - %s\n\n' "$ctx" "$server" "$km_status" "$detail"
+  printf '\n%s%s%s\n' "$KM_BOLD" "$(_km_t selected_context)" "$KM_RESET"
+  printf '%s: %s\n%s: %s\n%s: %s - %s\n\n' \
+    "$(_km_t context_label)" "$ctx" \
+    "$(_km_t server_label)" "$server" \
+    "$(_km_t status_label)" "$km_status" "$detail"
 
-  case "$km_status" in AUTH|TLS|OFFLINE|ERROR)
-    printf '%sO K9s não será aberto enquanto a conexão estiver inválida.%s\n' "$KM_RED" "$KM_RESET"
-    return 1
+  case "$km_status" in
+    AUTH|TLS|OFFLINE|ERROR)
+      printf '%s%s%s\n' "$KM_RED" "$(_km_t k9s_invalid_connection)" "$KM_RESET"
+      return 1
+      ;;
   esac
 
   if _km_is_prod_context "$ctx"; then
-    printf '%sAMBIENTE IDENTIFICADO COMO PRODUÇÃO%s\n' "$KM_YELLOW" "$KM_RESET"
-    printf ' [1] Abrir K9s READ-ONLY (recomendado)\n'
-    printf ' [2] Abrir K9s normal\n'
-    printf ' [0] Cancelar\nEscolha [1]: '
+    printf '%s%s%s\n' "$KM_YELLOW" "$(_km_t production_detected)" "$KM_RESET"
+    printf ' %s\n' "$(_km_t k9s_readonly_option)"
+    printf ' %s\n' "$(_km_t k9s_normal_option)"
+    printf ' %s\n%s' "$(_km_t cancel_option)" "$(_km_t choose_default_prompt)"
     IFS= read -r mode
-    [ -n "$mode" ] || mode=1
+    [[ -n "$mode" ]] || mode=1
     case "$mode" in
-      1) k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx" --readonly ;;
-      2)
-        printf 'Confirme novamente o contexto [%s]. Digite SIM para continuar: ' "$ctx"
-        IFS= read -r answer
-        [ "$answer" = 'SIM' ] && k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx" || printf 'Cancelado.\n'
+      1)
+        k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx" --readonly
         ;;
-      *) printf 'Cancelado.\n' ;;
+      2)
+        printf "$(_km_t confirm_prod_context)" "$ctx"
+        IFS= read -r answer
+        if [[ "$answer" = "$(_km_t confirm_prod_word)" ]]; then
+          k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx"
+        else
+          printf '%s\n' "$(_km_t cancelled)"
+        fi
+        ;;
+      *) printf '%s\n' "$(_km_t cancelled)" ;;
     esac
   else
-    printf 'Abrir K9s neste contexto? [s/N]: '
+    printf '%s' "$(_km_t open_k9s_question)"
     IFS= read -r answer
-    case "$answer" in s|S|sim|SIM|y|Y|yes|YES) k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx" ;; *) printf 'Cancelado.\n' ;; esac
+    if _km_is_yes "$answer"; then
+      k9s --kubeconfig "$KM_MAIN_CONFIG" --context "$ctx"
+    else
+      printf '%s\n' "$(_km_t cancelled)"
+    fi
   fi
 }
 
@@ -607,120 +747,47 @@ _km_backups() {
 _km_restore() {
   local files selected choice current_backup
   files="$(find "$KM_BACKUPS_DIR" -type f -name 'config-*.yaml' -print | sort -r)"
-  [ -n "$files" ] || {
-    printf 'Nenhum backup de config encontrado.\n'
+  [[ -n "$files" ]] || {
+    printf '%s\n' "$(_km_t no_backups)"
     return 1
   }
 
   if command -v fzf >/dev/null 2>&1; then
-    selected="$(printf '%s\n' "$files" | fzf --prompt='Backup > ')" || return 1
+    selected="$(printf '%s\n' "$files" | fzf \
+      --prompt="$(_km_t backup_prompt)" \
+      --height='~40%' \
+      --layout=reverse \
+      --border \
+      --no-multi \
+      --cycle \
+      --header="$(_km_t nav_hint)")" || return 1
   else
-    printf '%s\n' "$files" | awk '{printf " %2d) %s\n", NR, $0}'
-    printf 'Escolha: '
+    printf '%s\n' "$files" | awk '{printf " %2d) %s\\n", NR, $0}'
+    printf '%s' "$(_km_t choose_prompt)"
     IFS= read -r choice
     selected="$(printf '%s\n' "$files" | sed -n "${choice}p")"
   fi
 
-  [ -n "$selected" ] || return 1
+  [[ -n "$selected" ]] || return 1
   current_backup="$(_km_backup_main_config)" || return 1
-  [ -n "$current_backup" ] && printf 'Backup do estado atual: %s\n' "$current_backup"
+  [[ -n "$current_backup" ]] && printf "$(_km_t current_backup)\n" "$current_backup"
   cp "$selected" "$KM_MAIN_CONFIG" || return 1
   chmod 600 "$KM_MAIN_CONFIG" 2>/dev/null || true
-  printf '%sRestaurado:%s %s\n' "$KM_GREEN" "$KM_RESET" "$selected"
+  printf '%s' "$KM_GREEN"
+  printf "$(_km_t restored)\n" "$selected"
+  printf '%s' "$KM_RESET"
 }
 
 _km_help() {
   local topic="$1"
-  case "$topic" in
-    sync)
-      cat <<'HELP'
-km sync
-
-Reconstrói ~/.kube/config usando todos os kubeconfigs em:
-  ~/.kube/configs-plugin-km/
-
-Antes de substituir o config principal:
-  - valida colisões de context/cluster/user
-  - cria backup em backups-plugin-km
-  - faz merge + flatten
-  - tenta preservar o current-context anterior
-HELP
-      ;;
-    import)
-      cat <<'HELP'
-km import <arquivo>
-
-Importa um kubeconfig para configs-plugin-km.
-
-Regras:
-  - mesma identidade + mesma hash: DUPLICATE, não importa
-  - mesma identidade + hash diferente: UPDATE, oferece substituir
-  - mesmo API server + identidade diferente: pergunta se substitui ou mantém separado
-  - cluster novo: cria um novo arquivo usando o nome do contexto
-HELP
-      ;;
-    downloads)
-      cat <<'HELP'
-km downloads
-km downloads import
-
-Procura kubeconfigs válidos em ~/Downloads e classifica:
-  NEW          cluster/contexto ainda não importado
-  DUPLICATE    arquivo idêntico a um já importado
-  UPDATE       mesmo cluster/contexto, mas credencial/conteúdo mudou
-  SAME_SERVER  mesmo API server, porém contexto/namespace diferente
-
-Use "km downloads import" para perguntar arquivo por arquivo se deseja importar.
-HELP
-      ;;
-    k9s)
-      cat <<'HELP'
-km k9s [context]
-
-Valida e exibe explicitamente o contexto antes de abrir o K9s.
-Contextos com nome prod/prd/production oferecem READ-ONLY como padrão.
-HELP
-      ;;
-    *)
-      cat <<'HELP'
-Kubernetes Config Manager (km)
-
-Uso:
-  km                         menu interativo
-  km help [comando]          ajuda geral ou específica
-  km sources                 lista kubeconfigs em configs-plugin-km
-  km scan                    alias de sources
-  km downloads               verifica kubeconfigs em ~/Downloads
-  km downloads import        importa/atualiza Downloads interativamente
-  km import <arquivo>        importa um kubeconfig específico
-  km sync                    reconstrói ~/.kube/config
-  km contexts                lista contexts do config principal
-  km current                 mostra current-context
-  km use [context]           seleciona e confirma um current-context
-  km status                  valida todos os contexts
-  km validate [context]      valida um ou todos os contexts
-  km k9s [context]           valida/confirma e abre K9s
-  km backups                 lista backups
-  km restore                 restaura backup interativamente
-
-Diretórios:
-  ~/.kube/configs-plugin-km/   fontes dos kubeconfigs
-  ~/.kube/backups-plugin-km/   backups do plugin
-  ~/.kube/state-plugin-km/     hashes/metadados de importação
-  ~/.kube/config               config consolidado usado pelo kubectl/K9s
-
-Ajuda específica:
-  km help import
-  km help downloads
-  km help sync
-  km help k9s
-HELP
-      ;;
+  case "$KM_LANGUAGE" in
+    pt_BR) _km_help_pt_BR "$topic" ;;
+    *)     _km_help_en_US "$topic" ;;
   esac
 }
 
 _km_pause() {
-  printf '\nPressione ENTER para continuar...'
+  printf '\n%s' "$(_km_t pause)"
   IFS= read -r _km_dummy
 }
 
@@ -729,37 +796,36 @@ _km_menu_numeric() {
   while true; do
     clear
     printf '%sKubernetes Config Manager%s\n\n' "$KM_BOLD" "$KM_RESET"
-    printf 'Current context: %s\n' "$(kubectl config current-context --kubeconfig="$KM_MAIN_CONFIG" 2>/dev/null || printf '-')"
-    printf 'Sources:         %s\n\n' "$KM_CONFIGS_DIR"
-    cat <<'MENU'
-  1) Status/validar todos os clusters
-  2) Ver kubeconfigs em Downloads
-  3) Importar kubeconfig específico
-  4) Sincronizar configs -> ~/.kube/config
-  5) Listar contexts
-  6) Trocar current-context
-  7) Validar um contexto
-  8) Abrir K9s
-  9) Listar fontes
- 10) Backups
- 11) Restaurar backup
-  h) Help
-  0) Sair
-MENU
-    printf '\nEscolha: '
+    printf '%s: %s\n' "$(_km_t current_context)" "$(kubectl config current-context --kubeconfig="$KM_MAIN_CONFIG" 2>/dev/null || printf '-')"
+    printf '%s: %s\n\n' "$(_km_t sources)" "$KM_CONFIGS_DIR"
+    printf '  1) %s\n' "$(_km_t menu_status)"
+    printf '  2) %s\n' "$(_km_t menu_downloads)"
+    printf '  3) %s\n' "$(_km_t menu_import)"
+    printf '  4) %s\n' "$(_km_t menu_sync)"
+    printf '  5) %s\n' "$(_km_t menu_contexts)"
+    printf '  6) %s\n' "$(_km_t menu_use)"
+    printf '  7) %s\n' "$(_km_t menu_validate)"
+    printf '  8) %s\n' "$(_km_t menu_k9s)"
+    printf '  9) %s\n' "$(_km_t menu_sources)"
+    printf ' 10) %s\n' "$(_km_t menu_backups)"
+    printf ' 11) %s\n' "$(_km_t menu_restore)"
+    printf ' 12) %s\n' "$(_km_t menu_language)"
+    printf '  h) %s\n' "$(_km_t menu_help)"
+    printf '  0) %s\n' "$(_km_t menu_exit)"
+    printf '\n%s' "$(_km_t choose_prompt)"
     IFS= read -r option
 
     case "$option" in
       1) _km_status; _km_pause ;;
       2)
         _km_downloads
-        printf '\nDeseja entrar no modo de importação dos Downloads? [s/N]: '
+        printf '\n%s' "$(_km_t downloads_import_question)"
         IFS= read -r option
-        case "$option" in s|S|sim|SIM|y|Y|yes|YES) _km_downloads import ;; esac
+        _km_is_yes "$option" && _km_downloads import
         _km_pause
         ;;
       3)
-        printf 'Caminho do kubeconfig: '
+        printf '%s' "$(_km_t kubeconfig_path)"
         IFS= read -r file
         file="${file/#\~/$HOME}"
         _km_import_file "$file"
@@ -773,9 +839,10 @@ MENU
       9) _km_sources; _km_pause ;;
       10) _km_backups; _km_pause ;;
       11) _km_restore; _km_pause ;;
+      12) _km_language ;;
       h|H|help) _km_help; _km_pause ;;
       0|q|Q) return 0 ;;
-      *) printf 'Opção inválida.\n'; sleep 1 ;;
+      *) printf '%s\n' "$(_km_t invalid_option)"; sleep 1 ;;
     esac
   done
 }
@@ -783,7 +850,6 @@ MENU
 _km_menu() {
   local selected action file answer context
 
-  # Sem fzf, mantém compatibilidade com o menu numérico.
   if ! command -v fzf >/dev/null 2>&1; then
     _km_menu_numeric
     return $?
@@ -792,31 +858,32 @@ _km_menu() {
   while true; do
     clear
     printf '%sKubernetes Config Manager%s\n\n' "$KM_BOLD" "$KM_RESET"
-    printf 'Current context: %s\n' "$(kubectl config current-context --kubeconfig="$KM_MAIN_CONFIG" 2>/dev/null || printf '-')"
-    printf 'Sources:         %s\n\n' "$KM_CONFIGS_DIR"
+    printf '%s: %s\n' "$(_km_t current_context)" "$(kubectl config current-context --kubeconfig="$KM_MAIN_CONFIG" 2>/dev/null || printf '-')"
+    printf '%s: %s\n\n' "$(_km_t sources)" "$KM_CONFIGS_DIR"
 
-    selected="$(cat <<'MENU' | fzf \
-      --prompt='Ação > ' \
-      --height='~70%' \
-      --layout=reverse \
-      --border \
-      --no-multi \
-      --cycle \
-      --header='↑/↓ navega • Enter seleciona • Esc cancela'
-01  Status/validar todos os clusters
-02  Ver kubeconfigs em Downloads
-03  Importar kubeconfig específico
-04  Sincronizar configs -> ~/.kube/config
-05  Listar contexts
-06  Trocar current-context
-07  Validar um contexto
-08  Abrir K9s
-09  Listar fontes
-10  Backups
-11  Restaurar backup
-H   Help
-0   Sair
-MENU
+    selected="$(
+      printf '%s\n' \
+        "01  $(_km_t menu_status)" \
+        "02  $(_km_t menu_downloads)" \
+        "03  $(_km_t menu_import)" \
+        "04  $(_km_t menu_sync)" \
+        "05  $(_km_t menu_contexts)" \
+        "06  $(_km_t menu_use)" \
+        "07  $(_km_t menu_validate)" \
+        "08  $(_km_t menu_k9s)" \
+        "09  $(_km_t menu_sources)" \
+        "10  $(_km_t menu_backups)" \
+        "11  $(_km_t menu_restore)" \
+        "12  $(_km_t menu_language)" \
+        "H   $(_km_t menu_help)" \
+        "0   $(_km_t menu_exit)" | fzf \
+          --prompt="$(_km_t action_prompt)" \
+          --height='~70%' \
+          --layout=reverse \
+          --border \
+          --no-multi \
+          --cycle \
+          --header="$(_km_t nav_hint)"
     )" || return 0
 
     action="${selected%% *}"
@@ -825,13 +892,13 @@ MENU
       01) _km_status; _km_pause ;;
       02)
         _km_downloads
-        printf '\nDeseja entrar no modo de importação dos Downloads? [s/N]: '
+        printf '\n%s' "$(_km_t downloads_import_question)"
         IFS= read -r answer
-        case "$answer" in s|S|sim|SIM|y|Y|yes|YES) _km_downloads import ;; esac
+        _km_is_yes "$answer" && _km_downloads import
         _km_pause
         ;;
       03)
-        printf 'Caminho do kubeconfig: '
+        printf '%s' "$(_km_t kubeconfig_path)"
         IFS= read -r file
         file="${file/#\~/$HOME}"
         _km_import_file "$file"
@@ -848,6 +915,7 @@ MENU
       09) _km_sources; _km_pause ;;
       10) _km_backups; _km_pause ;;
       11) _km_restore; _km_pause ;;
+      12) _km_language ;;
       H|h) _km_help; _km_pause ;;
       0) return 0 ;;
     esac
@@ -856,10 +924,11 @@ MENU
 
 kube-manager() {
   _km_ensure_dirs
+  _km_load_language
   _km_require || return 1
 
   local command="${1:-menu}"
-  [ "$#" -gt 0 ] && shift
+  [[ "$#" -gt 0 ]] && shift
 
   case "$command" in
     menu) _km_menu ;;
@@ -867,7 +936,7 @@ kube-manager() {
     sources|scan) _km_sources ;;
     downloads) _km_downloads "$1" ;;
     import)
-      [ -n "$1" ] || { printf 'Uso: km import <arquivo>\n'; return 1; }
+      [[ -n "$1" ]] || { printf '%s\n' "$(_km_t import_usage)"; return 1; }
       _km_import_file "${1/#\~/$HOME}"
       ;;
     sync) _km_sync ;;
@@ -879,8 +948,9 @@ kube-manager() {
     k9s) _km_k9s "$1" ;;
     backups) _km_backups ;;
     restore) _km_restore ;;
+    lang|language) _km_language "$1" ;;
     *)
-      printf 'Comando desconhecido: %s\n\n' "$command"
+      printf "$(_km_t unknown_command)\n\n" "$command"
       _km_help
       return 1
       ;;
